@@ -25,23 +25,35 @@ from utils import (
 st.set_page_config(page_title="Shrutimitra — Vedic Chant Coach", layout="wide")
 
 # --- Branding header ---
+# --- Branding header (with Sanskrit wordmark) ---
 from pathlib import Path
 BRAND_DIR = Path(__file__).parent / "branding"
 ASSETS = BRAND_DIR / "assets"
+
+# Load CSS
 with open(BRAND_DIR / "custom.css", "r", encoding="utf-8") as _f:
     st.markdown(f"<style>{_f.read()}</style>", unsafe_allow_html=True)
-st.markdown(
-    f"""
-    <div class="brand-header">
-      <img src="app://localfile/{ASSETS / 'shrutimitra_icon_256.png'}" alt="logo" width="48" height="48"/>
-      <div>
-        <div class="brand-title">Shrutimitra</div>
-        <div class="brand-tagline">Perfect your Vedic chanting — accents, timing, and pronunciation.</div>
-      </div>
-      <span class="badge">MVP</span>
-    </div>
-    """, unsafe_allow_html=True
-)
+
+def render_brand_header():
+    col1, col2 = st.columns([0.15, 1])
+    with col1:
+        try:
+            st.image(str(ASSETS / "shrutimitra_icon_256.png"), width=64)
+        except Exception:
+            st.write("🎧")  # fallback emoji
+    with col2:
+        try:
+            st.image(str(ASSETS / "shrutimitra_wordmark.png"), use_container_width=False)
+        except Exception:
+            st.markdown("**श्रुतिमित्र**", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="brand-title">Shrutimitra</div>'
+            '<div class="brand-tagline">Perfect your Vedic chanting — accents, timing, and pronunciation.</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown('<div class="badge">MVP</div>', unsafe_allow_html=True)
+
+render_brand_header()
 
 st.title("🎧 Vedic Chant Coach")
 st.caption("Upload a benchmark (Guru) chant and a learner recording, then get targeted feedback.")
