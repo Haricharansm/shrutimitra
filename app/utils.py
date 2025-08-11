@@ -1,9 +1,12 @@
 import io
+import subprocess
 import numpy as np
 import librosa
+import soundfile as sf
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
 from fastdtw import fastdtw
+
 
 @dataclass
 class Segment:
@@ -14,20 +17,67 @@ class Segment:
     f0_slope: float
     accent: str
 
-# --- Audio I/O (no soundfile) ---
-def load_audio_mono_16k(file_like, target_sr=16000):
+
+# --- Audio I/O (soundfile-first, Py3.13-safe) ---
+def _read_all_bytes(file_like_or_path) -> bytes:
+    if hasattr(file_like_or_path, "read"):
+        return file_like_or_path.read()
+    with open(file_like_or_path, "rb") as f:
+        return f.read()
+
+def _ffmpeg_decode_to_wav_bytes(raw_bytes: bytes, target_sr: int = 16000, mono: bool = True) -> bytes:
     """
-    Load audio (bytes or file) into mono float32 at target_sr using librosa.
-    Supports WAV/OGG/FLAC by default. MP3 may work if ffmpeg is available.
+    Use system ffmpeg to decode arbitrary audio to WAV in-memory.
+    Requires `ffmpeg` to be available on PATH (install via packages.txt).
     """
-    if hasattr(file_like, "read"):
-        data = file_like.read()
-        y, sr = librosa.load(io.BytesIO(data), sr=target_sr, mono=True)
-    else:
-        y, sr = librosa.load(file_like, sr=target_sr, mono=True)
-    if y.size > 0 and np.max(np.abs(y)) > 0:
+    cmd = [
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-i", "pipe:0",
+        "-f", "wav",
+    ]
+    if mono:
+        cmd += ["-ac", "1"]
+    if target_sr:
+        cmd += ["-ar", str(target_sr)]
+    cmd += ["pipe:1"]
+
+    proc = subprocess.run(cmd, input=raw_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError(f"ffmpeg decode failed: {proc.stderr.decode('utf-8', errors='ignore')[:200]}")
+    return proc.stdout
+
+def load_audio_mono_16k(file_like, target_sr: int = 16000):
+    """
+    Robust loader that avoids audioread/aifc on Py3.13 by using soundfile.
+    - Tries soundfile directly (WAV/FLAC/OGG supported via libsndfile).
+    - If that fails (e.g., MP3), falls back to ffmpeg -> WAV bytes -> soundfile.
+    Returns mono float32 audio normalized to [-1, 1] at `target_sr`.
+    """
+    raw = _read_all_bytes(file_like)
+
+    # 1) Try soundfile directly
+    try:
+        y, sr = sf.read(io.BytesIO(raw), always_2d=False)
+    except Exception:
+        # 2) Fallback: ffmpeg decode to WAV, then read with soundfile
+        wav_bytes = _ffmpeg_decode_to_wav_bytes(raw, target_sr=target_sr, mono=True)
+        y, sr = sf.read(io.BytesIO(wav_bytes), always_2d=False)
+
+    # to mono
+    if y.ndim > 1:
+        y = np.mean(y, axis=1)
+
+    # resample if needed (ffmpeg path already did it, but sf path might not)
+    if sr != target_sr:
+        y = librosa.resample(y.astype(np.float32), orig_sr=sr, target_sr=target_sr)
+        sr = target_sr
+
+    # light normalization
+    if y.size and np.max(np.abs(y)) > 0:
         y = y / np.max(np.abs(y))
-    return y.astype(np.float32), target_sr
+
+    return y.astype(np.float32), sr
+
 
 # --- Pitch & onsets ---
 def moving_average(x, w):
@@ -45,8 +95,10 @@ def extract_pitch_pyinnish(y, sr, fmin=75, fmax=400, frame_length=2048, hop_leng
 
 def detect_onsets_times(y, sr, backtrack=True, onset_sensitivity=0.3):
     o_env = librosa.onset.onset_strength(y=y, sr=sr)
-    onsets = librosa.onset.onset_detect(onset_envelope=o_env, sr=sr, backtrack=backtrack, units='time',
-                                        pre_max=3, post_max=3, pre_avg=3, post_avg=3, delta=onset_sensitivity)
+    onsets = librosa.onset.onset_detect(
+        onset_envelope=o_env, sr=sr, backtrack=backtrack, units='time',
+        pre_max=3, post_max=3, pre_avg=3, post_avg=3, delta=onset_sensitivity
+    )
     times = [0.0] + list(onsets)
     if len(y) > 0:
         times.append(len(y)/sr)
@@ -62,6 +114,7 @@ def resample_to_len(x, L):
 def dtw_align_cost_path(a, b):
     distance, path = fastdtw(a, b, dist=lambda x, y: abs(float(x) - float(y)))
     return distance, path
+
 
 # --- Segments & scoring ---
 def _accent_from_slope(m):
@@ -126,6 +179,7 @@ def draw_wave_and_pitch_with_segments(y, sr, times, f0, segs, title="Audio"):
     for s in segs: plt.axvline(s.t0, alpha=0.2)
     plt.title(title); plt.xlabel("Time (s)"); plt.ylabel("Amplitude / Hz"); plt.legend(loc="upper right")
     plt.tight_layout(); return fig
+
 
 # --- Phones (template-based) ---
 def parse_phones_from_text(txt: Optional[str]) -> Optional[List[List[str]]]:
@@ -209,6 +263,7 @@ def classify_learner_phones(y_user: np.ndarray, sr: int, onsets_u: np.ndarray, p
                 time_sec_start=float(onsets_u[i]), time_sec_end=float(onsets_u[i+1])
             ))
     return out
+
 
 # --- Natural language summary ---
 def generate_natural_language_feedback(accent_msgs: List[Dict[str,Any]], phone_msgs: List[Dict[str,Any]]) -> str:
