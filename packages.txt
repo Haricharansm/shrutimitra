@@ -1,3 +1,4 @@
 gfortran
 libblas-dev
 liblapack-dev
+ffmpeg
