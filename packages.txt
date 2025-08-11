@@ -2,3 +2,4 @@ gfortran
 libblas-dev
 liblapack-dev
 ffmpeg
+libsndfile1
