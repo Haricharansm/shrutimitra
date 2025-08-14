@@ -16,6 +16,113 @@ class Segment:
     f0_mean: float
     f0_slope: float
     accent: str
+# ============ NEW: Vedic accent helpers & visualizations ============
+
+def _safe_mean_pitch(f: np.ndarray) -> float:
+    f = f[np.isfinite(f) & (f > 0)]
+    return float(np.mean(f)) if f.size else 0.0
+
+def _segment_pitch(times: np.ndarray, f0: np.ndarray, t0: float, t1: float) -> np.ndarray:
+    mask = (times >= t0) & (times < t1)
+    return f0[mask]
+
+def _classify_vedic(mean_hz: float, slope: float, global_med: float) -> str:
+    """
+    Heuristic:
+      - udātta   : mean above global median by > ~10% (raised)
+      - anudātta : mean below global median by > ~10% (low)
+      - svarita  : otherwise, especially if slope is falling
+    """
+    if mean_hz <= 0 or global_med <= 0:
+        return "unknown"
+    rel = (mean_hz - global_med) / global_med
+    if rel > 0.10:
+        return "udātta"
+    if rel < -0.10:
+        return "anudātta"
+    # around the median – prefer svarita if falling slope
+    return "svarita" if slope < -5.0 else "udātta" if slope > 5.0 else "anudātta"
+
+def label_segments_vedic(segs: List[Segment], times: np.ndarray, f0: np.ndarray) -> List[str]:
+    global_med = _safe_mean_pitch(f0)
+    labels = []
+    for s in segs:
+        seg_f = _segment_pitch(times, f0, s.t0, s.t1)
+        m = _safe_mean_pitch(seg_f)
+        labels.append(_classify_vedic(m, s.f0_slope, global_med))
+    return labels
+
+def _cents(a_hz: float, b_hz: float) -> float:
+    """Return pitch difference a vs b in cents (positive = a higher)."""
+    if a_hz <= 0 or b_hz <= 0:
+        return np.nan
+    return float(1200.0 * np.log2(a_hz / b_hz))
+
+def score_segment(guru: Segment, learner: Segment, guru_mean_hz: float, learner_mean_hz: float) -> Dict[str, float]:
+    """
+    Combines pitch mean (cents), slope/accent and duration into a 0-100 score.
+    """
+    cents_err = abs(_cents(learner_mean_hz, guru_mean_hz))
+    # tolerances (can be tuned or tied to "strictness")
+    cents_tol = 40.0      # ~ 1/3 semitone
+    slope_tol = 8.0
+    dur_rel = abs(learner.dur - guru.dur) / max(guru.dur, 1e-6)
+
+    # sub-scores 0..1
+    sp = max(0.0, 1.0 - cents_err / cents_tol)
+    ss = max(0.0, 1.0 - min(abs(learner.f0_slope - guru.f0_slope), 2*slope_tol) / slope_tol)
+    sd = max(0.0, 1.0 - min(dur_rel, 1.0))
+
+    total = 100.0 * (0.5*sp + 0.3*ss + 0.2*sd)
+    return dict(score=total, cents_err=cents_err, dur_err_pct=100.0*dur_rel)
+
+def draw_overlay_guru_learner(times_g, f0_g, segs_g, times_u, f0_u, segs_u, verdicts=None, title="Guru vs Learner"):
+    """
+    Single figure with Guru & Learner pitch overlaid; optional colored
+    vertical bands (green/yellow/red) per aligned segment index.
+    """
+    import matplotlib.pyplot as plt
+    fig = plt.figure(figsize=(10, 3.2))
+    plt.plot(times_g, f0_g, alpha=0.9, label="Guru pitch (Hz)")
+    plt.plot(times_u, f0_u, alpha=0.9, linestyle="--", label="Learner pitch (Hz)")
+    N = min(len(segs_g), len(segs_u))
+    for i in range(N):
+        s = segs_g[i]
+        color = None
+        if verdicts and i < len(verdicts):
+            v = verdicts[i]
+            if v >= 85: color = (0.85, 1.0, 0.85, 0.3)   # light green
+            elif v >= 65: color = (1.0, 1.0, 0.75, 0.3)  # light yellow
+            else: color = (1.0, 0.85, 0.85, 0.35)        # light red
+        if color:
+            plt.axvspan(s.t0, s.t1, color=color, linewidth=0)
+        else:
+            plt.axvline(s.t0, alpha=0.15, linewidth=1)
+    plt.title(title)
+    plt.xlabel("Time (s)"); plt.ylabel("Pitch (Hz)")
+    plt.legend(loc="upper right"); plt.tight_layout()
+    return fig
+
+def slice_audio_to_wav_bytes(y: np.ndarray, sr: int, t0: float, t1: float) -> io.BytesIO:
+    """Return a BytesIO WAV for [t0, t1) seconds."""
+    import wave
+    y = y.copy()
+    s0 = max(0, int(t0*sr)); s1 = max(s0+1, int(t1*sr))
+    seg = y[s0:s1]
+    # 20 ms fade to avoid clicks
+    w = max(1, int(0.02*sr))
+    if len(seg) >= 2*w:
+        env = np.ones_like(seg)
+        env[:w] = np.linspace(0,1,w); env[-w:] = np.linspace(1,0,w)
+        seg = seg * env
+    seg16 = np.clip(seg*32767, -32768, 32767).astype(np.int16)
+    bio = io.BytesIO()
+    with wave.open(bio, "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+        wf.writeframes(seg16.tobytes())
+    bio.seek(0)
+    return bio
+# ======================= END NEW HELPERS ============================
 
 
 # --- Audio I/O (soundfile-first, Py3.13-safe) ---
